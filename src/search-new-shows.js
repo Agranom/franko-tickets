@@ -38,12 +38,13 @@ const sendTelegramMessage = async (lastShow) => {
 };
 
 const updateShowTitleAndNotify = async () => {
+  const client = new MongoClient(process.env.MONGODB_URI);
   try {
+    await client.connect();
+
     const lastShow = await fetchLatestShow();
 
     if (lastShow) {
-      const client = new MongoClient(process.env.MONGODB_URI);
-      await client.connect();
 
       const showRecord = await client.db().collection('TheatreShow').findOne();
 
@@ -60,6 +61,9 @@ const updateShowTitleAndNotify = async () => {
     }
   } catch (e) {
     console.error(`Couldn't update and notify`, e);
+    throw new Error(e);
+  } finally {
+    await client.close();
   }
 
 };
