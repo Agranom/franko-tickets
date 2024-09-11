@@ -1,40 +1,43 @@
 const axios = require('axios');
-const cheerio = require('cheerio');
 const { MongoClient } = require('mongodb');
+const { sendEmail } = require('./send-email');
 
-const fetchLatestShow = async () => {
-  try {
-    const { data } = await axios.get('http://tickets.ft.org.ua/web/afisha');
-    const $ = cheerio.load(data);
+const getLastPageNumber = async () => {
+  const { data } = await axios.get('https://sales.ft.org.ua/events');
 
-    // Select the last show's relevant tags
-    const lastShow = $('tr').last(); // Assuming each show is within a `tr` tag
+  return data.pagination.total;
+};
 
-    // Extract details
-    const link = lastShow.find('td.left.for-info h3.left a').attr('href');
-    const title = lastShow.find('td.left.for-info h3.left a').text().trim();
-    const imgSrc = lastShow.find('td.left a img').attr('src');
-    const dateTime = lastShow.find('td.left.for-info h4').text().trim();
+const getLatestShow = async () => {
+  const lastPageNum = await getLastPageNumber();
+  const { data } = await axios.get(`https://sales.ft.org.ua/events?page=${lastPageNum}`);
+  // Event object
+  // {
+  //   "id": 5104,
+  //   "name": "Земля",
+  //   "month_year": "Жовтень 2024",
+  //   "event_date": "Чт, 31 Жовтня 18:00",
+  //   "event_duration": {
+  //   "minutes": 75,
+  //     "genitive_minutes": "ХВИЛИН"
+  // },
+  //   "image": "https://ft.org.ua/storage/performance/35/7d16c1efa8e9e35215c29a18afc12c4512397025.jpg",
+  //   "route": "https://sales.ft.org.ua/events/5104"
+  // }
+  const lastEvent = data.events.at(-1);
+  const { id: showId, route: link, name: title, image: imgSrc, event_date: dateTime } = lastEvent;
 
-    return { link, title, imgSrc, dateTime };
-  } catch (error) {
-    console.error('Error fetching the webpage:', error);
-    return null;
-  }
+  return { showId, link, title, imgSrc, dateTime };
 };
 
 const sendTelegramMessage = async (lastShow) => {
-  try {
-    await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
-      chat_id: process.env.TELEGRAM_CHAT_ID,
-      photo: lastShow.imgSrc,
-      caption: `*Нова вистава:* "${lastShow.title}" \n*Дата та час:* ${lastShow.dateTime} \n[Посилання](${lastShow.link})`,
-      parse_mode: 'Markdown',
-    });
-    console.log(`Message successfully sent!`);
-  } catch (e) {
-    console.error(`Couldn't send telegram message`, e.message);
-  }
+  await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+    chat_id: process.env.TELEGRAM_CHAT_ID,
+    photo: lastShow.imgSrc,
+    caption: `*Нова вистава:* "${lastShow.title}" \n*Дата та час:* ${lastShow.dateTime} \n[Посилання](${lastShow.link})`,
+    parse_mode: 'Markdown',
+  });
+  console.log(`Message successfully sent!`);
 };
 
 const updateShowTitleAndNotify = async () => {
@@ -42,26 +45,27 @@ const updateShowTitleAndNotify = async () => {
   try {
     await client.connect();
 
-    const lastShow = await fetchLatestShow();
+    const lastShow = await getLatestShow();
 
     if (lastShow) {
 
-      const showRecord = await client.db().collection('TheatreShow').findOne();
+      const showRecord = await client.db().collection('TheatreShow').findOne({ showId: lastShow.showId });
 
-      if (!showRecord || showRecord.title !== lastShow.title) {
+      if (!showRecord) {
 
         await sendTelegramMessage(lastShow);
 
-        await client.db()
-          .collection('TheatreShow')
-          .findOneAndUpdate({ _id: showRecord?._id }, { $set: { title: lastShow.title } }, { upsert: true });
+        await client.db().collection('TheatreShow').deleteMany({});
+        await client.db().collection('TheatreShow').insertOne(lastShow);
+
         console.log(`Data updated`);
+      } else {
+        console.log(`No updates found`);
       }
-      console.log(`No updates found`);
     }
   } catch (e) {
     console.error(`Couldn't update and notify`, e);
-    throw new Error(e);
+    await sendEmail('Franko tickets parsing error', e.message);
   } finally {
     await client.close();
   }
